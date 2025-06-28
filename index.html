@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>4-Month Calendar with Booked/Tentative Days</title>
+<script src="https://alcdn.msauth.net/browser/2.35.0/js/msal-browser.min.js"></script>
+<style>
+    body { font-family: Arial, sans-serif; }
+    .calendar-container { display: flex; flex-wrap: nowrap; gap: 20px; }
+    .month { border: 1px solid #ccc; border-radius: 8px; padding: 10px; width: 260px; }
+    .month h3 { text-align: center; }
+    .days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 5px; text-align: center; }
+    .day { padding: 5px; border-radius: 4px; cursor: pointer; user-select: none; }
+    .booked { background-color: #ff8080; color: white; }
+    .tentative { background-color: #ffd280; }
+    .legend { margin-top: 20px; }
+    .legend-item { display: inline-flex; align-items: center; margin-right: 15px; }
+    .legend-color { width: 15px; height: 15px; display: inline-block; margin-right: 5px; border: 1px solid #000; }
+    .legend-booked { background-color: #ff8080; }
+    .legend-tentative { background-color: #ffd280; }
+    .selected { outline: 2px dashed #000; }
+    .controls { margin-top: 20px; }
+    textarea { width: 100%; height: 100px; }
+    .btn { margin: 5px 0; }
+    #contextMenu {
+        position: absolute;
+        display: none;
+        background: #fff;
+        border: 1px solid #ccc;
+        z-index: 1000;
+        box-shadow: 2px 2px 5px rgba(0,0,0,0.2);
+    }
+    #contextMenu button {
+        display: block;
+        width: 100%;
+        padding: 5px 10px;
+        border: none;
+        background: none;
+        text-align: left;
+        cursor: pointer;
+    }
+    #contextMenu button:hover {
+        background-color: #eee;
+    }
+</style>
+</head>
+<body>
+
+<h2>4-Month Calendar (Booked & Tentative Days)</h2>
+<div class="controls">
+    <button onclick="signIn()">Sign In to Outlook</button>
+    <button onclick="fetchOutlookData()">Retrieve Outlook Calendar Data</button>
+</div>
+
+<div class="legend">
+    <div class="legend-item"><span class="legend-color legend-booked"></span> Booked</div>
+    <div class="legend-item"><span class="legend-color legend-tentative"></span> Tentative</div>
+</div>
+
+<div class="calendar-container" id="calendarContainer"></div>
+
+<h3>Array Data</h3>
+<div>
+    <textarea id="combinedOutput" readonly></textarea>
+    <button class="btn" onclick="copyCombinedToClipboard()">Copy Arrays</button>
+</div>
+
+<div id="contextMenu">
+    <button onclick="applyContextAction('booked')">Mark as Booked</button>
+    <button onclick="applyContextAction('tentative')">Mark as Tentative</button>
+    <button onclick="applyContextAction('clear')">Clear Selection</button>
+</div>
+
+<script>
+const msalConfig = {
+    auth: {
+        clientId: "ed095f31-6c56-4829-9420-7da818e57702",
+        authority: "https://login.microsoftonline.com/common",
+        redirectUri: "http://localhost:8000"
+    }
+};
+const msalInstance = new msal.PublicClientApplication(msalConfig);
+let accessToken = null;
+
+let bookedRanges = [];
+let tentativeRanges = [];
+
+let selecting = false;
+let isDragging = false;
+let selectionStart = null;
+let selectionEnd = null;
+
+function signIn() {
+    msalInstance.loginPopup({ scopes: ["Calendars.Read"] })
+        .then(loginResponse => {
+            return msalInstance.acquireTokenSilent({ scopes: ["Calendars.Read"], account: loginResponse.account })
+                .catch(() => msalInstance.acquireTokenPopup({ scopes: ["Calendars.Read"] }));
+        })
+        .then(tokenResponse => {
+            accessToken = tokenResponse.accessToken;
+            alert("Signed in successfully");
+        })
+        .catch(err => alert("Sign-in failed: " + err.message));
+}
+
+function fetchOutlookData() {
+    if (!accessToken) return alert("Please sign in first.");
+
+    const today = new Date();
+    const startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+    const endDate = new Date(today.getFullYear(), today.getMonth() + 4, 0);
+
+    const url = `https://graph.microsoft.com/v1.0/me/calendarview?startDateTime=${startDate.toISOString()}&endDateTime=${endDate.toISOString()}`;
+
+    bookedRanges = [];
+    tentativeRanges = [];
+
+    function fetchPage(nextUrl) {
+        fetch(nextUrl, { headers: { Authorization: `Bearer ${accessToken}` } })
+            .then(res => res.json())
+            .then(data => {
+                (data.value || []).forEach(event => {
+                    const startDateTime = new Date(event.start.dateTime);
+                    const endDateTime = new Date(event.end.dateTime);
+
+                    let start = startDateTime.getFullYear() + '-' + String(startDateTime.getMonth() + 1).padStart(2, '0') + '-' + String(startDateTime.getDate()).padStart(2, '0');
+
+                    let adjustedEndDate = new Date(endDateTime);
+                    if (adjustedEndDate.getHours() === 0 && adjustedEndDate.getMinutes() === 0 && adjustedEndDate.getSeconds() === 0) {
+                        adjustedEndDate.setDate(adjustedEndDate.getDate() - 1);
+                    }
+                    let end = adjustedEndDate.getFullYear() + '-' + String(adjustedEndDate.getMonth() + 1).padStart(2, '0') + '-' + String(adjustedEndDate.getDate()).padStart(2, '0');
+
+                    if (event.categories && (event.categories.includes("Booked") || event.categories.includes("Personal"))) {
+                        bookedRanges.push({ start, end });
+                    } else if (event.categories && event.categories.includes("Tentative")) {
+                        tentativeRanges.push({ start, end });
+                    }
+                });
+
+                if (data["@odata.nextLink"]) {
+                    fetchPage(data["@odata.nextLink"]);
+                } else {
+                    renderCalendar();
+                }
+            })
+            .catch(err => alert("Error fetching calendar: " + err.message));
+    }
+
+    fetchPage(url);
+}
+
+function isInRange(dateStr, ranges) {
+    const date = new Date(dateStr);
+    return ranges.some(r => new Date(r.start) <= date && date <= new Date(r.end));
+}
+
+function renderCalendar() {
+    const container = document.getElementById('calendarContainer');
+    container.innerHTML = '';
+    const today = new Date();
+    const currentMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    for (let i = 0; i < 4; i++) {
+        const monthDate = new Date(currentMonth.getFullYear(), currentMonth.getMonth() + i, 1);
+        const monthName = monthDate.toLocaleString('default', { month: 'long' });
+        const year = monthDate.getFullYear();
+
+        const monthDiv = document.createElement('div');
+        monthDiv.className = 'month';
+        monthDiv.innerHTML = `<h3>${monthName} ${year}</h3><div class="days"></div>`;
+
+        const daysDiv = monthDiv.querySelector('.days');
+
+        dayNames.forEach(dn => {
+            const header = document.createElement('div');
+            header.style.fontWeight = 'bold';
+            header.textContent = dn;
+            daysDiv.appendChild(header);
+        });
+
+        const firstDay = new Date(year, monthDate.getMonth(), 1).getDay();
+        const totalDays = new Date(year, monthDate.getMonth() + 1, 0).getDate();
+
+        for (let d = 0; d < firstDay; d++) {
+            daysDiv.appendChild(document.createElement('div'));
+        }
+
+        for (let d = 1; d <= totalDays; d++) {
+            const dateStr = `${year}-${String(monthDate.getMonth() + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+            const dayDiv = document.createElement('div');
+            dayDiv.className = 'day';
+            dayDiv.textContent = d;
+            dayDiv.dataset.date = dateStr;
+
+            if (isInRange(dateStr, bookedRanges)) dayDiv.classList.add('booked');
+            else if (isInRange(dateStr, tentativeRanges)) dayDiv.classList.add('tentative');
+
+            dayDiv.addEventListener('mousedown', (e) => {
+                if (e.button === 0) {
+                    selecting = true;
+                    isDragging = false;
+                    selectionStart = dateStr;
+                    selectionEnd = dateStr;
+                    clearSelections();
+                    dayDiv.classList.add('selected');
+                }
+            });
+
+            dayDiv.addEventListener('mouseenter', () => {
+                if (selecting) {
+                    isDragging = true;
+                    selectionEnd = dayDiv.dataset.date;
+                    highlightSelection(selectionStart, selectionEnd);
+                }
+            });
+
+            dayDiv.addEventListener('mouseup', (e) => {
+                if (e.button === 0 && selecting) {
+                    selecting = false;
+                    if (!isDragging) {
+                        // Single day click: selectionEnd = selectionStart
+                        selectionEnd = selectionStart;
+                        highlightSelection(selectionStart, selectionEnd);
+                    }
+                }
+            });
+
+            dayDiv.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+                if (selectionStart && selectionEnd) {
+                    const menu = document.getElementById('contextMenu');
+                    menu.style.top = `${e.pageY}px`;
+                    menu.style.left = `${e.pageX}px`;
+                    menu.style.display = 'block';
+                }
+            });
+
+            daysDiv.appendChild(dayDiv);
+        }
+
+        container.appendChild(monthDiv);
+    }
+    updateOutputs();
+}
+
+document.addEventListener('click', () => {
+    document.getElementById('contextMenu').style.display = 'none';
+});
+
+document.addEventListener('mouseup', () => {
+    if (selecting) {
+        selecting = false;
+        if (!isDragging) {
+            selectionEnd = selectionStart;
+            highlightSelection(selectionStart, selectionEnd);
+        }
+    }
+});
+
+function highlightSelection(start, end) {
+    const allDays = document.querySelectorAll('.day');
+    allDays.forEach(day => {
+        day.classList.remove('selected');
+        const date = day.dataset.date;
+        if (date >= (start < end ? start : end) && date <= (start > end ? start : end)) {
+            day.classList.add('selected');
+        }
+    });
+}
+
+function clearSelections() {
+    document.querySelectorAll('.day').forEach(day => day.classList.remove('selected'));
+}
+
+function applyContextAction(action) {
+    const start = selectionStart < selectionEnd ? selectionStart : selectionEnd;
+    const end = selectionStart > selectionEnd ? selectionStart : selectionEnd;
+    if (action === 'booked') bookedRanges.push({ start, end });
+    else if (action === 'tentative') tentativeRanges.push({ start, end });
+    else if (action === 'clear') {
+        bookedRanges = bookedRanges.filter(r => r.end < start || r.start > end);
+        tentativeRanges = tentativeRanges.filter(r => r.end < start || r.start > end);
+    }
+    selecting = false;
+    selectionStart = null;
+    selectionEnd = null;
+    document.getElementById('contextMenu').style.display = 'none';
+    renderCalendar();
+}
+
+function updateOutputs() {
+    const bookedText = bookedRanges.map(r => `{ start: \"${r.start}\", end: \"${r.end}\" }`).join(",\n    ");
+    const tentativeText = tentativeRanges.map(r => `{ start: \"${r.start}\", end: \"${r.end}\" }`).join(",\n    ");
+    const combined = `const bookedRanges = [\n    ${bookedText}\n];\n\nconst tentativeRanges = [\n    ${tentativeText}\n];`;
+    document.getElementById('combinedOutput').value = combined;
+}
+
+function copyCombinedToClipboard() {
+    const text = document.getElementById('combinedOutput');
+    text.select();
+    text.setSelectionRange(0, 99999);
+    document.execCommand('copy');
+    alert('Copied to clipboard!');
+}
+
+renderCalendar();
+</script>
+
+</body>
+</html>
